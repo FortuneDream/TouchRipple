@@ -11,10 +11,16 @@ import android.graphics.drawable.Drawable;
 import android.os.SystemClock;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
+import android.util.Log;
 import android.view.MotionEvent;
+import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.Interpolator;
 
+//退出动画有两种
+// 1.点击后快速释放：进入动画完成后再执行退出动画
+// 2.点击后长时间按住：进入动画完成后，当用户抬起手指时才执行退出动画
+//透明度的问题目前还没有解决
 public class TouchRippleDrawable extends Drawable {
     private int mAlpha = 100;
     private int mRippleColor = 0;
@@ -24,10 +30,6 @@ public class TouchRippleDrawable extends Drawable {
     private float mRipplePointY = 0;
     private float mRippleRadius = 200;
     private Bitmap mBitmap;
-    private float mProgress = 0;
-    //每次递增的进度值
-    private float mEnterIncrement = 16f / 3600;
-    private Interpolator mEnterInterpolator = new DecelerateInterpolator(2);//先快后慢差值器；2表示变化速率
     //按下时的点击点
     private float mDonePointX, mDonePointY;
     //控件的中心区域点
@@ -35,20 +37,75 @@ public class TouchRippleDrawable extends Drawable {
     //开始和结束的半径
     private float mStartRadius, mEndRadius;
     private int mBackgroundColor;
+    private int mPaintAlpha = 255;
+
+
+    private float mEnterProgress = 0;
+    //每次递增的进度值
+    private float mEnterIncrement = 16f / 360;
+    private Interpolator mEnterInterpolator = new DecelerateInterpolator(2);//先快后慢差值器；2表示变化速率
     private Runnable mEnterRunnable = new Runnable() {
         @Override
         public void run() {
-            mProgress = mProgress + mEnterIncrement;//百分比
-            if (mProgress > 1) {
+            mEnterProgress = mEnterProgress + mEnterIncrement;//百分比
+            if (mEnterProgress > 1) {
+                onEnterProgress(1);
+                onEnterDone();
                 return;//终点
             }
-            float realProgress = mEnterInterpolator.getInterpolation(mProgress);//传入百分比,返回真实进度值
+            float realProgress = mEnterInterpolator.getInterpolation(mEnterProgress);//传入百分比,返回真实进度值
             onEnterProgress(realProgress);
 
             scheduleSelf(this, SystemClock.uptimeMillis() + 16);//延迟16ms，刷新频率为60FPS
         }
     };
 
+    //退出动画进度值
+    private float mExitProgress = 0;
+    //每次递增的进度值
+    private float mExitIncrement = 16f / 280;
+    private Interpolator mExitInterpolator = new AccelerateInterpolator(2);//先慢后快差值器；2表示变化速率
+    private Runnable mExitRunnable = new Runnable() {
+        @Override
+        public void run() {
+            mExitProgress += mExitIncrement;//百分比
+            if (mExitProgress > 1) {
+                onExitProgress(1);//如果没有设置为1的话，最后的progress没有到1
+                onExitDone();
+                return;//终点
+            }
+            float realProgress = mExitInterpolator.getInterpolation(mExitProgress);//传入百分比,返回真实进度值
+            onExitProgress(realProgress);
+            scheduleSelf(this, SystemClock.uptimeMillis() + 16);//延迟16ms，刷新频率为60FPS
+        }
+    };
+
+
+    //用户的手指是否抬起
+    private boolean mTouchRelease;
+    //进入动画完成
+    private boolean mEnterDone;
+
+    /**
+     * 退出刷新方法
+     *
+     * @param progress 进度值0-1
+     */
+    //背景减淡
+    private void onExitProgress(float progress) {
+        int alpha = (int) getProgressValue(255, 0, progress);
+        mBackgroundColor = changeColorAlpha(0x30000000, alpha);
+        mPaintAlpha = (int) getProgressValue(255, 0, progress);
+        Log.e("TAG", "onExitProgress" + String.valueOf(progress));
+        invalidateSelf();
+    }
+
+
+    /**
+     * 进入动画刷新方法
+     *
+     * @param progress 进度值 0-1
+     */
     private void onEnterProgress(float progress) {
         mRippleRadius = 360 * progress;
         mRippleRadius = getProgressValue(mStartRadius, mEndRadius, progress);
@@ -59,6 +116,7 @@ public class TouchRippleDrawable extends Drawable {
         invalidateSelf();
     }
 
+
     private float getProgressValue(float start, float end, float progress) {
         return start + (end - start) * progress;
     }
@@ -68,7 +126,6 @@ public class TouchRippleDrawable extends Drawable {
         mPaint = new Paint();
         mPaint.setAntiAlias(true);
         mPaint.setDither(true);
-
         setRippleColor(Color.RED);
         //第一个是保留的颜色（红色），第二个表示填充的颜色，
 //        setColorFilter(new LightingColorFilter(0xFFFF0000,0x00330000));
@@ -98,12 +155,22 @@ public class TouchRippleDrawable extends Drawable {
         }
     }
 
+    //当进入动画完成时启动退出动画
     private void onTouchCancel(float x, float y) {
+        mTouchRelease = true;//抬起
+        //启动退出动画
+        if (mEnterDone) {
+            startExitRunnable();
+        }
     }
 
     private void onTouchUp(float x, float y) {
 //        unscheduleSelf(mEnterRunnable);//抬起时去掉。但如果没有在onTouchEvent用返回true或者Button.setOnclickListener的话，并不能触发Action__Up
-//
+        mTouchRelease = true;//抬起
+        //当进入动画完成时启动退出动画
+        if (mEnterDone) {
+            startExitRunnable();
+        }
     }
 
     private void onTouchMove(float x, float y) {
@@ -114,13 +181,48 @@ public class TouchRippleDrawable extends Drawable {
         mDonePointX = x;
         mDonePointY = y;
         invalidateSelf();//需要设置Callback（View已经实现了），重写以及verifyDrawable,onSizeChanged
+        mTouchRelease = false;//按下
         startEnterRunnable();
     }
 
+    /**
+     * 启动进入的方法
+     */
     private void startEnterRunnable() {
-        mProgress = 0;
+        mPaintAlpha = 255;
+        mEnterProgress = 0;
+        mEnterDone = false;
         unscheduleSelf(mEnterRunnable);//先取消一次，否则每次点击会，加载越来越快（因为每次点击都会开一个线程）
         scheduleSelf(mEnterRunnable, SystemClock.uptimeMillis());//事件队列，使用Drawable所依附的View的已经实现Callback接口，在Callback中使用handler机制发送任务
+    }
+
+    /**
+     * 启动退出动画
+     */
+    private void startExitRunnable() {
+        mExitProgress = 0;
+        unscheduleSelf(mEnterRunnable);//取消进入动画
+        unscheduleSelf(mExitRunnable);//先取消一次，否则每次点击会，加载越来越快（因为每次点击都会开一个线程）
+        scheduleSelf(mExitRunnable, SystemClock.uptimeMillis());//事件队列，使用Drawable所依附的View的已经实现Callback接口，在Callback中使用handler机制发送任务
+    }
+
+    /**
+     * 进入动画完成
+     */
+    private void onEnterDone() {
+        Log.e("TAG", "onEnterDone");
+        mEnterDone = true;
+        //用户手放开时，启动退出动画
+        if (mTouchRelease) {
+            startExitRunnable();
+        }
+    }
+
+    /**
+     * 退出动画完成
+     */
+    private void onExitDone() {
+        Log.e("TAG", "onExitDone");
     }
 
     @Override
@@ -141,6 +243,7 @@ public class TouchRippleDrawable extends Drawable {
     public void draw(@NonNull Canvas canvas) {
         //绘制背景区域
         canvas.drawColor(mBackgroundColor);
+        mPaint.setAlpha(mPaintAlpha);
         canvas.drawBitmap(mBitmap, 0, 0, mPaint);
         canvas.drawCircle(mRipplePointX, mRipplePointY, mRippleRadius, mPaint);
 
